@@ -21,8 +21,8 @@ from miot.types import (
     MIoTActionParam,
     MIoTCameraInfo,
     MIoTDeviceBindEvent,
-    MIoTDevicePropertyChangedEvent,
     MIoTDeviceInfo,
+    MIoTDevicePropertyChangedEvent,
     MIoTGetPropertyParam,
     MIoTLanDeviceInfo,
     MIoTManualSceneInfo,
@@ -33,8 +33,8 @@ from miot.types import (
 )
 from pydantic_core import to_jsonable_python
 
-from miloco.config import get_settings
 from miloco.automation.schema import MiotEventTrigger
+from miloco.config import get_settings
 from miloco.database.kv_repo import AuthConfigKeys, DeviceInfoKeys, KVRepo
 from miloco.miot.camera_handler import CameraVisionHandler
 from miloco.miot.filter import is_home_allowed

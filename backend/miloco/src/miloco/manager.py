@@ -8,10 +8,10 @@ Service manager module
 import logging
 import uuid
 
+from miloco.automation.service import AutomationService
 from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo, SystemConfigKeys
 from miloco.database.person_repo import PersonRepo
-from miloco.automation.service import AutomationService
 from miloco.home_profile.service import HomeProfileService
 from miloco.miot.client import MiotProxy
 from miloco.miot.service import MiotService

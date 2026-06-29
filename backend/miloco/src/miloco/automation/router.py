@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
+from pathlib import Path as _Path
 
 from fastapi import APIRouter, Depends, Query
 from fastapi.responses import FileResponse
-from pathlib import Path as _Path
 
 from miloco.automation.schema import (
     MiotEventManualTriggerRequest,
@@ -15,8 +16,8 @@ from miloco.automation.schema import (
 )
 from miloco.manager import get_manager
 from miloco.middleware import verify_token
-from miloco.schema.common_schema import NormalResponse
 from miloco.rule.schema import RuleTriggerType
+from miloco.schema.common_schema import NormalResponse
 
 logger = logging.getLogger(__name__)
 
@@ -68,9 +69,11 @@ async def delete_mapping(mapping_id: str, current_user: str = Depends(verify_tok
 @router.get("/snapshots/{filename}", summary="Serve automation snapshot image")
 async def serve_snapshot(filename: str):
     """Serve a saved automation snapshot JPEG."""
+    if not re.match(r"^[A-Za-z0-9_.\-]+\.jpg$", filename):
+        return NormalResponse(code=400, message="invalid filename", data=None)
     import os
     home = os.environ.get("MILOCO_HOME", "/root/.openclaw/miloco")
-    snap_path = _Path(home) / "static" / "clips" / "automation" / filename
+    snap_path = _Path(home) / "static" / "clips" / "automation" / _Path(filename).name
     if not snap_path.exists():
         return NormalResponse(code=404, message="not found", data=None)
     return FileResponse(str(snap_path), media_type="image/jpeg")
@@ -234,7 +237,8 @@ async def device_spec(did: str, current_user: str = Depends(verify_token)):
             "model": model, "name": device.name, "properties": props
         })
     except Exception as e:
-        logger.warning("device_spec failed for did=%s: %s", did, e)
+        safe_did = re.sub(r"[^\w.\-]", "_", did or "")
+        logger.warning("device_spec failed for did=%s: %s", safe_did, e)
         return NormalResponse(code=500, message=str(e), data=None)
 
 

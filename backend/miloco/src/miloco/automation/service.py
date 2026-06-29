@@ -10,11 +10,12 @@ from miloco.automation.schema import (
     MiotEventCatalog,
     MiotEventMapping,
     MiotEventMappingUpdate,
-    MiotPropertyFilterCondition,
     MiotEventSource,
     MiotEventTrigger,
     MiotEventTriggerLog,
+    MiotPropertyFilterCondition,
 )
+from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo
 from miloco.middleware.exceptions import ResourceNotFoundException
 from miloco.perception.schema import OnDemandPerceptionRequest
@@ -24,7 +25,6 @@ from miloco.perception.snapshot_writer import (
     save_clips,
 )
 from miloco.rule.schema import RuleTriggerType
-from miloco.config import get_settings
 from miloco.utils.time_utils import now_ms
 
 logger = logging.getLogger(__name__)
@@ -424,10 +424,11 @@ class AutomationService:
         # Save a snapshot frame from the on-demand collected batch for video replay
         snapshot_paths: list[str] = []
         try:
-            import cv2
-            import numpy as np
             import os
             from pathlib import Path as _Path
+            
+            import cv2
+            import numpy as np
 
             miloco_home = os.environ.get("MILOCO_HOME", "/root/.openclaw/miloco")
             clips_dir = _Path(miloco_home) / "static" / "clips" / "automation"

@@ -197,13 +197,13 @@ curl -H "Authorization: Bearer $TOKEN" \
 
 ## 如果我要修改感知触发相关功能
 
-| 修改目标 | 去看哪个文件 |
-| --- | --- |
-| 修改事件映射 API | `backend/miloco/src/miloco/automation/router.py` |
-| 修改事件匹配 / 冷却时间 / 触发编排 | `backend/miloco/src/miloco/automation/service.py` |
-| 修改事件结构定义 | `backend/miloco/src/miloco/automation/schema.py` |
-| 修改米家属性事件接入 | `backend/miloco/src/miloco/miot/client.py`、`backend/miot/src/miot/mips_cloud.py` |
-| 修改页面展示与交互 | `web/src/components/AutomationPage.tsx` |
+| 修改目标                           | 去看哪个文件                                                                      |
+| ---------------------------------- | --------------------------------------------------------------------------------- |
+| 修改事件映射 API                   | `backend/miloco/src/miloco/automation/router.py`                                  |
+| 修改事件匹配 / 冷却时间 / 触发编排 | `backend/miloco/src/miloco/automation/service.py`                                 |
+| 修改事件结构定义                   | `backend/miloco/src/miloco/automation/schema.py`                                  |
+| 修改米家属性事件接入               | `backend/miloco/src/miloco/miot/client.py`、`backend/miot/src/miot/mips_cloud.py` |
+| 修改页面展示与交互                 | `web/src/components/AutomationPage.tsx`                                           |
 
 ## 感知触发相关 API 路径
 
