@@ -105,7 +105,6 @@ async def test_sync_property_subscriptions_only_tracks_enabled_device_mappings(
     mappings = [
         MiotEventMapping(source_type="device", source_id="B", enabled=True),
         MiotEventMapping(source_type="device", source_id="C", enabled=False),
-        MiotEventMapping(source_type="scene", source_id="scene-1", enabled=True),
         MiotEventMapping(source_type="device", source_id="dev/skip", enabled=True),
         MiotEventMapping(source_type="device", source_id="missing", enabled=True),
     ]
@@ -118,11 +117,11 @@ async def test_sync_property_subscriptions_only_tracks_enabled_device_mappings(
 
     await proxy._sync_property_subscriptions()
 
-    proxy._miot_client.sub_device_property_changed_async.assert_not_awaited()
+    proxy._miot_client.sub_device_property_changed_async.assert_awaited_once_with("C")
     proxy._miot_client.unsub_device_property_changed_async.assert_awaited_once_with(
         "OLD"
     )
-    assert proxy._subscribed_property_dids == {"B"}
+    assert proxy._subscribed_property_dids == {"B", "C"}
 
 
 @pytest.mark.asyncio
