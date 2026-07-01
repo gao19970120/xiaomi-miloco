@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 from miloco.automation.schema import MiotEventMapping, MiotEventTrigger
@@ -10,6 +9,7 @@ from miloco.automation.service import (
     _coerce_number,
     _match_condition,
 )
+from miloco.middleware.exceptions import ResourceNotFoundException
 from miloco.perception.types import CaptionEntry, MatchedRule
 from miloco.rule.schema import RuleTriggerType
 
@@ -23,6 +23,34 @@ class _KVRepoStub:
 
     def set(self, key: str, value: str) -> None:
         self._store[key] = value
+
+
+class _RuleServiceStub:
+    def __init__(self, rules: list[SimpleNamespace] | None = None) -> None:
+        self.rules = rules or []
+        self.created_rules = []
+
+    async def create_rule(self, rule):
+        rule.id = f"rule-auto-{len(self.created_rules) + 1}"
+        self.created_rules.append(rule)
+        self.rules.append(rule)
+        return rule.id
+
+    async def update_rule(self, rule):
+        for idx, existing in enumerate(self.rules):
+            if existing.id == rule.id:
+                self.rules[idx] = rule
+                return True
+        raise ResourceNotFoundException(f"Rule '{rule.id}' not found")
+
+    async def delete_rule(self, rule_id):
+        self.rules = [rule for rule in self.rules if rule.id != rule_id]
+        return True
+
+    async def get_all_rules(self, enabled_only=False):
+        if not enabled_only:
+            return self.rules
+        return [rule for rule in self.rules if getattr(rule, "enabled", True)]
 
 
 @pytest.mark.parametrize(
@@ -91,11 +119,15 @@ async def test_handle_trigger_uses_structured_perception_context():
             matched_rules=[],
         )
 
+    async def _handle_structured(**kwargs):
+        captured["postprocess"] = kwargs
+        return SimpleNamespace(snapshot_count=0, clip_kind=None)
+
     perception_service = SimpleNamespace(
         structured_on_demand_perceive=_structured,
-        publish_meaningful_event=lambda _: None,
+        handle_structured_perception_result=_handle_structured,
     )
-    rule_service = SimpleNamespace(get_all_rules=AsyncMock(return_value=[]))
+    rule_service = _RuleServiceStub()
     meaningful_events_dao = SimpleNamespace(
         insert=lambda **_: None,
         update_snapshot_count=lambda *_: None,
@@ -122,13 +154,16 @@ async def test_handle_trigger_uses_structured_perception_context():
     assert captured["sources"] == ["cam-1"]
     assert "米家触发上下文" in captured["extra_context"]
     assert "属性变化" in captured["extra_context"]
-    assert captured["rules"][0]["condition"]["query"] == "重点看门口"
+    assert captured["rules"][0]["id"].startswith("rule-auto-")
+    assert captured["rules"][0]["condition"]["query"] == "请判断画面中是否符合这个感知提示：重点看门口"
+    assert captured["postprocess"]["text_prefix"].startswith("[米家设备触发]")
+    assert captured["postprocess"]["pulse_reset_matched_rules"] is True
 
 
 @pytest.mark.asyncio
-async def test_handle_trigger_updates_only_structured_real_rule_matches():
+async def test_handle_trigger_postprocesses_formal_mapping_rule_matches():
     service = AutomationService(_KVRepoStub())
-    mapping = service.create_mapping(
+    service.create_mapping(
         MiotEventMapping(
             source_type="device",
             source_id="sensor-1",
@@ -145,6 +180,7 @@ async def test_handle_trigger_updates_only_structured_real_rule_matches():
     rule = SimpleNamespace(
         id="rule-1",
         name="门口有人",
+        enabled=True,
         trigger_type=RuleTriggerType.MIOT_EVENT,
         condition=SimpleNamespace(
             source_ids=["sensor-1"],
@@ -155,9 +191,10 @@ async def test_handle_trigger_updates_only_structured_real_rule_matches():
             query="画面中是否有人在门口",
         ),
     )
-    update_state = AsyncMock()
+    captured: dict[str, object] = {}
 
-    async def _structured(*_, **__):
+    async def _structured(_sources, rules, **__):
+        captured["prompt_rule_ids"] = [rule["id"] for rule in rules]
         return SimpleNamespace(
             caption=[CaptionEntry(description="门口有人")],
             suggestions=[],
@@ -169,22 +206,23 @@ async def test_handle_trigger_updates_only_structured_real_rule_matches():
                     source_device_ids=["cam-1"],
                 ),
                 MatchedRule(
-                    rule_id=f"miot_mapping:{mapping.id}",
+                    rule_id="rule-auto-1",
                     rule_name="[感知触发] 门磁",
-                    reason="临时感知提示命中",
+                    reason="感知触发配置命中",
                     source_device_ids=["cam-1"],
                 ),
             ],
         )
 
+    async def _handle_structured(**kwargs):
+        captured["postprocess"] = kwargs
+        return SimpleNamespace(snapshot_count=0, clip_kind=None)
+
     perception_service = SimpleNamespace(
         structured_on_demand_perceive=_structured,
-        publish_meaningful_event=lambda _: None,
+        handle_structured_perception_result=_handle_structured,
     )
-    rule_service = SimpleNamespace(
-        get_all_rules=AsyncMock(return_value=[rule]),
-        update_state=update_state,
-    )
+    rule_service = _RuleServiceStub([rule])
     meaningful_events_dao = SimpleNamespace(
         insert=lambda **_: None,
         update_snapshot_count=lambda *_: None,
@@ -206,12 +244,9 @@ async def test_handle_trigger_updates_only_structured_real_rule_matches():
         meaningful_events_dao=meaningful_events_dao,
     )
 
-    update_state.assert_awaited_once()
-    assert update_state.await_args.args[:4] == (
-        "rule-1",
-        "cam-1",
-        True,
-        "画面中有人在门口",
-    )
-    assert log.matched_rule_ids == ["rule-1", f"miot_mapping:{mapping.id}"]
+    assert captured["prompt_rule_ids"] == ["rule-1", "rule-auto-1"]
+    assert all(not rule_id.startswith("miot_mapping:") for rule_id in captured["prompt_rule_ids"])
+    assert captured["postprocess"]["rule_id_filter"] == {"rule-1", "rule-auto-1"}
+    assert captured["postprocess"]["pulse_reset_matched_rules"] is True
+    assert log.matched_rule_ids == ["rule-1", "rule-auto-1"]
     assert len(log.structured_matched_rules) == 2

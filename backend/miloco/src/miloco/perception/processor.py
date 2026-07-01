@@ -703,3 +703,9 @@ class PipelineProcessor:
             except Exception as e:
                 logger.error("[processor] 结构化主动感知失败 | %s", e, exc_info=True)
                 return None
+
+    async def handle_structured_perception_result(self, **kwargs):
+        """Expose realtime post-processing for non-realtime structured results."""
+        return await self._perception_engine_proxy.handle_structured_perception_result(
+            **kwargs
+        )

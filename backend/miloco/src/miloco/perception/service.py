@@ -218,6 +218,10 @@ class PerceptionService:
             )
         return result
 
+    async def handle_structured_perception_result(self, **kwargs):
+        """Run the same post-processing path used by realtime perception."""
+        return await self._pipeline.handle_structured_perception_result(**kwargs)
+
     # ---- Perception logs ----
 
     def query_logs(

@@ -33,6 +33,7 @@ class MiotEventSource(BaseModel):
 
 class MiotEventMapping(BaseModel):
     id: str = Field(default="")
+    rule_id: str = Field(default="")
     source_type: Literal["device"] = Field(...)
     source_id: str = Field(...)
     source_name_snapshot: str = Field(default="")
@@ -48,6 +49,7 @@ class MiotEventMapping(BaseModel):
 
 
 class MiotEventMappingUpdate(BaseModel):
+    rule_id: str | None = Field(default=None)
     source_type: Literal["device"] | None = Field(default=None)
     source_id: str | None = Field(default=None)
     source_name_snapshot: str | None = Field(default=None)
