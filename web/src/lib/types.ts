@@ -264,12 +264,6 @@ export interface DeviceSpec {
   events?: DeviceSpecEvent[];
 }
 
-export interface DevicePropertyKey {
-  key: string;
-  count: number;
-  recent_values: string[];
-}
-
 export interface MiotEventTriggerLog {
   id: string;
   trigger: {
@@ -292,7 +286,6 @@ export interface MiotEventTriggerLog {
   matched_rule_ids: string[];
   skipped_reason: string;
   error: string;
-  snapshot_paths: string[];
   created_at: number;
 }
 

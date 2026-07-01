@@ -141,7 +141,8 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         denied = denied_camera_dids(kv)
         result: dict[str, PerceptionDevice] = {}
         for did, info in all_devices.items():
-            if not isinstance(info, MIoTCameraInfo):
+            is_rtsp = getattr(info, "source", None) == "rtsp"
+            if not isinstance(info, MIoTCameraInfo) and not is_rtsp:
                 continue
 
             if did in denied:
@@ -152,11 +153,14 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
 
             camera_info = CameraInfo.model_validate(info.model_dump())
 
-            device_online = camera_info.online and camera_info.lan_online
+            if is_rtsp:
+                device_online = bool(camera_info.online)
+            else:
+                device_online = bool(camera_info.online and camera_info.lan_online)
             # require_lan=False 时只看云端 online：放过 lan_online 陈旧成 false 的
             # 卡死态相机（云端 online=True，refresh 能救活），但排除云端就离线
             # （拔电/断网）的相机——给「应连数」判据用，避免离线相机致 refresh 空转。
-            connectable = device_online if require_lan else camera_info.online
+            connectable = device_online if require_lan or is_rtsp else camera_info.online
             if online_only and not connectable:
                 continue
 

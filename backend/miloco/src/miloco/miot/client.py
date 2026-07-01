@@ -169,6 +169,10 @@ class MiotProxy:
         self._subscribed_meta_dids: set[str] = set()
         self._subscribed_property_dids: set[str] = set()
         self._subscribed_event_dids: set[str] = set()
+        self._automation_mappings: list = []
+        self._automation_trigger_handler: Callable[
+            [MiotEventTrigger], Coroutine
+        ] | None = None
 
         # Listener for home-level scene changes (rename/delete/edit). Debounces
         # then refreshes the scene list.
@@ -309,6 +313,11 @@ class MiotProxy:
             oauth_info=self._oauth_info,
             cloud_server=self._cloud_server,
         )
+
+    def register_automation_trigger_handler(
+        self, handler: Callable[[MiotEventTrigger], Coroutine] | None
+    ) -> None:
+        self._automation_trigger_handler = handler
 
     @property
     def miot_client(self) -> MIoTClient:
@@ -867,7 +876,9 @@ class MiotProxy:
                 devices = await self._miot_client.get_devices_async()
                 self._device_info_dict = devices
                 await self._sync_meta_subscriptions()
-                await self.sync_automation_property_subscriptions()
+                await self.sync_automation_property_subscriptions(
+                    self._automation_mappings
+                )
                 await self._sync_scene_subscriptions()
                 return devices
             except Exception as e:
@@ -1016,10 +1027,8 @@ class MiotProxy:
         self, msg: MIoTDevicePropertyChangedEvent
     ) -> None:
         try:
-            from miloco.manager import get_manager
-
-            mgr = get_manager()
-            if not getattr(mgr, "_initialized", False):
+            handler = self._automation_trigger_handler
+            if handler is None:
                 return
             device = self._device_info_dict.get(msg.did)
             if device is None:
@@ -1027,8 +1036,8 @@ class MiotProxy:
             if device is None:
                 logger.debug("Property change ignored for unknown did=%s", msg.did)
                 return
-            await mgr.automation_service.handle_trigger(
-                trigger=MiotEventTrigger(
+            await handler(
+                MiotEventTrigger(
                     source_type="device",
                     source_id=msg.did,
                     source_name=device.name,
@@ -1038,12 +1047,7 @@ class MiotProxy:
                     changed_properties=msg.changed_properties,
                     occurred_at=msg.timestamp_ms,
                     raw=msg.raw,
-                ),
-                perception_service=mgr.perception_service,
-                rule_service=mgr.rule_service,
-                miot_service=mgr.miot_service,
-                meaningful_events_dao=mgr.meaningful_events_dao,
-                pipeline=mgr.perception_service._pipeline,
+                )
             )
         except Exception as e:
             logger.error("Failed to dispatch device-property automation trigger: %s", e)
@@ -1052,10 +1056,8 @@ class MiotProxy:
         self, msg: MIoTDeviceEventOccurredEvent
     ) -> None:
         try:
-            from miloco.manager import get_manager
-
-            mgr = get_manager()
-            if not getattr(mgr, "_initialized", False):
+            handler = self._automation_trigger_handler
+            if handler is None:
                 return
             device = self._device_info_dict.get(msg.did)
             if device is None:
@@ -1063,8 +1065,8 @@ class MiotProxy:
             if device is None:
                 logger.debug("Device event ignored for unknown did=%s", msg.did)
                 return
-            await mgr.automation_service.handle_trigger(
-                trigger=MiotEventTrigger(
+            await handler(
+                MiotEventTrigger(
                     source_type="device",
                     source_id=msg.did,
                     source_name=device.name,
@@ -1074,23 +1076,30 @@ class MiotProxy:
                     changed_properties=msg.arguments,
                     occurred_at=msg.timestamp_ms,
                     raw=msg.raw,
-                ),
-                perception_service=mgr.perception_service,
-                rule_service=mgr.rule_service,
-                miot_service=mgr.miot_service,
-                meaningful_events_dao=mgr.meaningful_events_dao,
-                pipeline=mgr.perception_service._pipeline,
+                )
             )
         except Exception as e:
             logger.error("Failed to dispatch device-event automation trigger: %s", e)
 
-    async def sync_automation_property_subscriptions(self) -> None:
+    async def sync_automation_property_subscriptions(self, mappings: list) -> None:
         """Refresh MiOT property/event subscriptions used by automation mappings."""
-        await self._sync_property_subscriptions()
-        await self._sync_event_subscriptions()
+        self._automation_mappings = list(mappings)
+        await self._sync_property_subscriptions(mappings)
+        await self._sync_event_subscriptions(mappings)
 
-    async def _sync_property_subscriptions(self) -> None:
-        target = {did for did in self._device_info_dict if "/" not in did}
+    async def _sync_property_subscriptions(self, mappings: list) -> None:
+        target = {
+            mapping.source_id
+            for mapping in mappings
+            if mapping.enabled
+            and mapping.source_type == "device"
+            and (
+                not mapping.event_kinds
+                or "device_prop" in mapping.event_kinds
+            )
+            and mapping.source_id in self._device_info_dict
+            and "/" not in mapping.source_id
+        }
         to_add = target - self._subscribed_property_dids
         to_remove = self._subscribed_property_dids - target
         if not to_add and not to_remove:
@@ -1122,15 +1131,7 @@ class MiotProxy:
             len(self._subscribed_property_dids),
         )
 
-    async def _sync_event_subscriptions(self) -> None:
-        from miloco.manager import get_manager
-
-        try:
-            mappings = get_manager().automation_service.list_mappings()
-        except Exception as e:
-            logger.warning("load automation mappings failed, skip event sync: %s", e)
-            return
-
+    async def _sync_event_subscriptions(self, mappings: list) -> None:
         target = {
             mapping.source_id
             for mapping in mappings

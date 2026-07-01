@@ -386,12 +386,6 @@ export function AutomationPage({ devices, cameras }: Props) {
     return token ? `${base}?token=${encodeURIComponent(token)}` : base;
   }
 
-  function getSnapshotUrl(path: string): string {
-    const filename = path.split("/").pop() ?? path;
-    const base = `/api/automation/snapshots/${encodeURIComponent(filename)}`;
-    return token ? `${base}?token=${encodeURIComponent(token)}` : base;
-  }
-
   const createDisabled = !sourceId || cameraIds.length === 0 || (sourceKind === "device_event" && !selectedEventKey);
   const createHint = !sourceId
     ? "请选择事件源"
@@ -802,12 +796,6 @@ export function AutomationPage({ devices, cameras }: Props) {
                       preload="metadata"
                       className="max-h-56 w-full rounded-md border border-border bg-black"
                     />
-                  ))}
-                </div>
-              ) : log.snapshot_paths?.length > 0 ? (
-                <div className="mt-2 flex gap-2 overflow-x-auto">
-                  {log.snapshot_paths.map((p: string) => (
-                    <img key={p} src={getSnapshotUrl(p)} className="max-h-32 rounded-md border border-border" alt="snapshot" />
                   ))}
                 </div>
               ) : null}

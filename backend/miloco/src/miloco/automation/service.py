@@ -18,12 +18,8 @@ from miloco.automation.schema import (
 from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo
 from miloco.middleware.exceptions import ResourceNotFoundException
+from miloco.perception import snapshot_writer
 from miloco.perception.schema import OnDemandPerceptionRequest
-from miloco.perception.snapshot_writer import (
-    check_disk_space,
-    get_snapshot_root,
-    save_clips,
-)
 from miloco.rule.schema import RuleTriggerType
 from miloco.utils.time_utils import now_ms
 
@@ -32,6 +28,33 @@ logger = logging.getLogger(__name__)
 _KV_MAPPINGS = "AUTOMATION_MIOT_EVENT_MAPPINGS"
 _KV_LOGS = "AUTOMATION_MIOT_EVENT_LOGS"
 _MAX_LOGS = 200
+
+
+def _save_clips_for_event(
+    event_id: str,
+    clips_by_device: dict[str, tuple[bytes, str]],
+) -> int:
+    """Persist on-demand clips across snapshot_writer API versions."""
+    save_event_artifacts = getattr(snapshot_writer, "save_event_artifacts", None)
+    if save_event_artifacts is not None:
+        try:
+            from miloco.perception.snapshot_context import OmniEventArtifacts
+
+            return int(
+                save_event_artifacts(
+                    event_id,
+                    OmniEventArtifacts(clips=clips_by_device, trace=None),
+                )
+            )
+        except (ImportError, TypeError, ValueError) as e:
+            logger.error("save_event_artifacts failed for %s: %s", event_id, e)
+            return 0
+
+    save_clips = getattr(snapshot_writer, "save_clips", None)
+    if save_clips is None:
+        logger.error("snapshot_writer has no clip persistence API")
+        return 0
+    return int(save_clips(event_id, clips_by_device))
 
 
 def _normalize_filter_condition(expected: Any) -> MiotPropertyFilterCondition:
@@ -190,7 +213,9 @@ class AutomationService:
                 continue
             fields = update.model_fields_set
             for field in fields:
-                setattr(mapping, field, getattr(update, field))
+                value = getattr(update, field)
+                if value is not None:
+                    setattr(mapping, field, value)
             mapping.updated_at = now_ms()
             self._save_mappings(mappings)
             return mapping
@@ -202,29 +227,6 @@ class AutomationService:
 
     def list_logs(self, limit: int = 50) -> list[MiotEventTriggerLog]:
         return self._load_logs()[:limit]
-
-    def get_device_property_keys(self, did: str) -> list[dict]:
-        """Return known property keys for a device from recent trigger logs,
-        with recent observed values for each key."""
-        logs = self._load_logs()
-        counter: dict[str, int] = {}
-        values: dict[str, list[str]] = {}
-        for item in logs:
-            if item.trigger.source_id != did:
-                continue
-            for k, v in item.trigger.changed_properties.items():
-                counter[k] = counter.get(k, 0) + 1
-                sv = str(v)
-                if k not in values:
-                    values[k] = []
-                if sv not in values[k]:
-                    values[k].append(sv)
-        result = []
-        for k, v in sorted(counter.items(), key=lambda x: -x[1]):
-            entry = {"key": k, "count": v, "recent_values": values.get(k, [])[:5]}
-            result.append(entry)
-        return result
-
 
     def _match_rule(self, rule, trigger: MiotEventTrigger) -> bool:
         if getattr(rule, "trigger_type", RuleTriggerType.PERCEPTION) != RuleTriggerType.MIOT_EVENT:
@@ -270,8 +272,8 @@ class AutomationService:
         self,
         trigger: MiotEventTrigger,
         candidate_rules: list[Any],
+        all_mappings: list[MiotEventMapping],
     ) -> list[MiotEventMapping]:
-        all_mappings = self._load_mappings()
         source_mappings = [
             m
             for m in all_mappings
@@ -295,10 +297,11 @@ class AutomationService:
     def _collect_direct_mappings(
         self,
         trigger: MiotEventTrigger,
+        all_mappings: list[MiotEventMapping],
     ) -> list[MiotEventMapping]:
         return [
             mapping
-            for mapping in self._load_mappings()
+            for mapping in all_mappings
             if self._match_mapping(mapping, trigger)
         ]
 
@@ -313,15 +316,19 @@ class AutomationService:
         rule_service,
         miot_service,
         meaningful_events_dao,
-        pipeline=None,
     ) -> MiotEventTriggerLog:
         all_rules = await rule_service.get_all_rules(enabled_only=True)
         candidate_rules = [rule for rule in all_rules if self._match_rule(rule, trigger)]
+        all_mappings = self._load_mappings()
         mapping_by_id = {
             mapping.id: mapping
-            for mapping in self._collect_direct_mappings(trigger)
+            for mapping in self._collect_direct_mappings(trigger, all_mappings)
         }
-        for mapping in self._collect_mappings_for_rules(trigger, candidate_rules):
+        for mapping in self._collect_mappings_for_rules(
+            trigger,
+            candidate_rules,
+            all_mappings,
+        ):
             mapping_by_id[mapping.id] = mapping
         mappings = list(mapping_by_id.values())
         log_item = MiotEventTriggerLog(
@@ -392,47 +399,18 @@ class AutomationService:
             return log_item
 
         answer = result.answer if result else ""
-        # Save a snapshot frame from the on-demand collected batch for video replay
-        snapshot_paths: list[str] = []
-        try:
-            import os
-            from pathlib import Path as _Path
-            
-            import cv2
-            import numpy as np
-
-            miloco_home = os.environ.get("MILOCO_HOME", "/root/.openclaw/miloco")
-            clips_dir = _Path(miloco_home) / "static" / "clips" / "automation"
-            clips_dir.mkdir(parents=True, exist_ok=True)
-
-            batch = pipeline._collector.collect_batch(camera_ids, drain=False) if pipeline else None
-            if batch and not batch.empty:
-                for device_id in camera_ids:
-                    data = batch.devices.get(device_id)
-                    if data and data.video:
-                        frame = data.video[-1].frame
-                        if isinstance(frame, np.ndarray) and frame.size > 0:
-                            snap_path = clips_dir / f"{log_item.id}_{device_id}.jpg"
-                            cv2.imwrite(str(snap_path), frame)
-                            snapshot_paths.append(str(snap_path))
-            if not snapshot_paths:
-                logger.debug("snapshot: no frames available for %s", camera_ids)
-        except Exception as e:
-            logger.debug("snapshot save failed: %s", e)
-
         log_item.perception_answer = answer
-        log_item.snapshot_paths = snapshot_paths
 
         clip_count = 0
         clip_kind = ""
         clip_device_ids: list[str] = []
         if clips_by_device:
             settings = get_settings()
-            snapshot_root = get_snapshot_root()
-            if check_disk_space(
+            snapshot_root = snapshot_writer.get_snapshot_root()
+            if snapshot_writer.check_disk_space(
                 snapshot_root, settings.perception.snapshot_min_free_disk_mb
             ):
-                clip_count = save_clips(log_item.id, clips_by_device)
+                clip_count = _save_clips_for_event(log_item.id, clips_by_device)
                 if clip_count > 0:
                     clip_kind = next(iter(clips_by_device.values()))[1]
                     clip_device_ids = [
@@ -490,9 +468,8 @@ class AutomationService:
             if clip_count > 0:
                 meaningful_events_dao.update_snapshot_count(log_item.id, clip_count)
         self._append_log(log_item)
-        if pipeline is not None and answer:
-            pipeline._publish(
-                "meaningful_event",
+        if answer:
+            perception_service.publish_meaningful_event(
                 {
                     "event_id": log_item.id,
                     "timestamp": trigger.occurred_at or now_ms(),
@@ -504,7 +481,7 @@ class AutomationService:
                     "device_ids": camera_ids,
                     "rule_names": {rule.id: rule.name for rule in candidate_rules},
                     "clip_kind": clip_kind or None,
-                },
+                }
             )
         return log_item
 

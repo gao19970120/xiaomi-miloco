@@ -194,6 +194,7 @@ class MIoTMediaDecoder(threading.Thread):
         audio_frame_callback: Optional[
             Callable[[AudioFrame, int, int, int, int], Coroutine]
         ] = None,
+        video_frame_interval: int = 0,
         enable_hw_accel: bool = False,
         enable_audio: bool = False,
         main_loop: Optional[asyncio.AbstractEventLoop] = None,
@@ -207,6 +208,8 @@ class MIoTMediaDecoder(threading.Thread):
 
         self._video_callback = video_callback
         self._video_frame_callback = video_frame_callback
+        self._video_frame_interval = max(0, video_frame_interval)
+        self._last_video_frame_emit_ms = 0
         self._audio_frame_callback = audio_frame_callback
         if enable_audio:
             if not audio_callback:
@@ -279,9 +282,6 @@ class MIoTMediaDecoder(threading.Thread):
                 self._video_decoder = VideoCodecContext.create("h264", "r")
             elif frame_data.codec_id == MIoTCameraCodec.VIDEO_H265:
                 self._video_decoder = VideoCodecContext.create("hevc", "r")
-            else:
-                _LOGGER.error("unsupported video codec: %s, skipping frame", frame_data.codec_id)
-                return
             _LOGGER.info("video decoder created, %s", frame_data.codec_id)
         pkt = Packet(frame_data.data)
         frames: List[VideoFrame] = self._video_decoder.decode(pkt)  # type: ignore
@@ -289,7 +289,17 @@ class MIoTMediaDecoder(threading.Thread):
         # Emit decoded frames as BGR numpy arrays (no rate limiting).
         # Converting to ndarray HERE in the decoder thread avoids cross-thread
         # FFmpeg access — the main thread only ever sees numpy data.
-        if self._video_frame_callback and frames:
+        emit_video_frame = (
+            self._video_frame_callback
+            and frames
+            and (
+                self._video_frame_interval == 0
+                or decoded_unix_ms - self._last_video_frame_emit_ms
+                >= self._video_frame_interval
+            )
+        )
+        if emit_video_frame:
+            self._last_video_frame_emit_ms = decoded_unix_ms
             for frame in frames:
                 try:
                     bgr = frame.to_ndarray(format="bgr24").astype("uint8")
@@ -336,17 +346,6 @@ class MIoTMediaDecoder(threading.Thread):
             # Create audio decoder
             if frame_data.codec_id == MIoTCameraCodec.AUDIO_OPUS:
                 self._audio_decoder = AudioCodecContext.create("opus", "r")
-            elif frame_data.codec_id == MIoTCameraCodec.AUDIO_G711A:
-                self._audio_decoder = AudioCodecContext.create("pcm_alaw", "r")
-                self._audio_decoder.sample_rate = 8000
-                self._audio_decoder.layout = "mono"
-            elif frame_data.codec_id == MIoTCameraCodec.AUDIO_G711U:
-                self._audio_decoder = AudioCodecContext.create("pcm_mulaw", "r")
-                self._audio_decoder.sample_rate = 8000
-                self._audio_decoder.layout = "mono"
-            else:
-                _LOGGER.error("unsupported audio codec: %s, skipping frame", frame_data.codec_id)
-                return
             self._resampler = AudioResampler(format="s16", layout="mono", rate=16000)
             _LOGGER.info("audio decoder created, %s", frame_data.codec_id)
         pkt = Packet(frame_data.data)

@@ -18,8 +18,7 @@ touch, so no MIoTClient / camera / OAuth stack is required.
 
 from __future__ import annotations
 
-import sys
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -92,7 +91,6 @@ async def test_sync_noop_when_already_in_sync():
 
 @pytest.mark.asyncio
 async def test_sync_property_subscriptions_only_tracks_enabled_device_mappings(
-    monkeypatch,
 ):
     proxy = _bare_proxy()
     proxy._subscribed_property_dids = {"OLD", "B"}
@@ -103,41 +101,80 @@ async def test_sync_property_subscriptions_only_tracks_enabled_device_mappings(
     }
 
     mappings = [
-        MiotEventMapping(source_type="device", source_id="B", enabled=True),
+        MiotEventMapping(
+            source_type="device",
+            source_id="B",
+            enabled=True,
+            event_kinds=["device_prop"],
+        ),
+        MiotEventMapping(
+            source_type="device",
+            source_id="C",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        ),
         MiotEventMapping(source_type="device", source_id="C", enabled=False),
         MiotEventMapping(source_type="device", source_id="dev/skip", enabled=True),
         MiotEventMapping(source_type="device", source_id="missing", enabled=True),
     ]
-    fake_mgr = SimpleNamespace(
-        automation_service=SimpleNamespace(list_mappings=lambda: mappings)
-    )
-    fake_manager = ModuleType("miloco.manager")
-    fake_manager.get_manager = lambda: fake_mgr  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "miloco.manager", fake_manager)
 
-    await proxy._sync_property_subscriptions()
+    await proxy._sync_property_subscriptions(mappings)
 
-    proxy._miot_client.sub_device_property_changed_async.assert_awaited_once_with("C")
+    proxy._miot_client.sub_device_property_changed_async.assert_not_awaited()
     proxy._miot_client.unsub_device_property_changed_async.assert_awaited_once_with(
         "OLD"
     )
-    assert proxy._subscribed_property_dids == {"B", "C"}
+    assert proxy._subscribed_property_dids == {"B"}
 
 
 @pytest.mark.asyncio
-async def test_sync_property_subscriptions_adds_new_enabled_mapping(monkeypatch):
+async def test_sync_event_subscriptions_only_tracks_device_event_mappings():
+    proxy = _bare_proxy()
+    proxy._subscribed_event_dids = {"OLD"}
+    proxy._device_info_dict = {
+        "B": SimpleNamespace(did="B"),
+        "C": SimpleNamespace(did="C"),
+        "dev/skip": SimpleNamespace(did="dev/skip"),
+    }
+
+    mappings = [
+        MiotEventMapping(
+            source_type="device",
+            source_id="B",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        ),
+        MiotEventMapping(
+            source_type="device",
+            source_id="C",
+            enabled=True,
+            event_kinds=["device_prop"],
+        ),
+        MiotEventMapping(
+            source_type="device",
+            source_id="dev/skip",
+            enabled=True,
+            event_kinds=["event.2.1"],
+        ),
+    ]
+
+    await proxy._sync_event_subscriptions(mappings)
+
+    proxy._miot_client.sub_device_event_occurred_async.assert_awaited_once_with("B")
+    proxy._miot_client.unsub_device_event_occurred_async.assert_awaited_once_with(
+        "OLD"
+    )
+    assert proxy._subscribed_event_dids == {"B"}
+
+
+@pytest.mark.asyncio
+async def test_sync_property_subscriptions_adds_new_enabled_mapping():
     proxy = _bare_proxy()
     proxy._device_info_dict = {"C": SimpleNamespace(did="C")}
 
     mappings = [MiotEventMapping(source_type="device", source_id="C", enabled=True)]
-    fake_mgr = SimpleNamespace(
-        automation_service=SimpleNamespace(list_mappings=lambda: mappings)
-    )
-    fake_manager = ModuleType("miloco.manager")
-    fake_manager.get_manager = lambda: fake_mgr  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "miloco.manager", fake_manager)
 
-    await proxy._sync_property_subscriptions()
+    await proxy._sync_property_subscriptions(mappings)
 
     proxy._miot_client.sub_device_property_changed_async.assert_awaited_once_with("C")
     proxy._miot_client.unsub_device_property_changed_async.assert_not_awaited()
