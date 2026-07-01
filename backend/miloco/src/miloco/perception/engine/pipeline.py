@@ -43,6 +43,7 @@ from miloco.perception.engine.types import (
     BatchPipelineResult,
     DevicePipelineResult,
     GatePacket,
+    GateTiming,
     GateTrigger,
     IdentityPacket,
     InputSlice,
@@ -388,7 +389,7 @@ async def run_batch_pipeline(
     gate_last_audio_pass_ts: "dict[str, float] | None" = None,
     gate_hold_active: "dict[str, bool] | None" = None,
     gate_hold_started_at: "dict[str, float] | None" = None,
-    bypass_gate: bool = False,
+    force_gate_pass_dids: set[str] | None = None,
 ) -> BatchPipelineResult:
     """Run perception pipeline for a batch of devices, grouped by room.
 
@@ -466,16 +467,10 @@ async def run_batch_pipeline(
         # 都用这把 UUID,processor._publish_trace 从 timing 读出复用,避免双钥匙。
         room_timing[f"_device_trace_id_{did}"] = device_trace_id
 
-        prev_frame = gate_prev_frames.get(did) if gate_prev_frames is not None else None
-        last_v = (
-            gate_last_visual_pass_ts.get(did)
-            if gate_last_visual_pass_ts is not None else None
-        )
-        last_a = (
-            gate_last_audio_pass_ts.get(did)
-            if gate_last_audio_pass_ts is not None else None
-        )
-        if bypass_gate:
+        force_gate_pass = did in (force_gate_pass_dids or set())
+        if force_gate_pass:
+            # 米家等离散外部事件只替代本轮 Gate 放行，不更新实时 Gate 的跨窗基准。
+            has_audio = bool(snapshot.audio_clip.size)
             gate_packet = GatePacket(
                 packet_id=str(uuid.uuid4()),
                 room_name=snapshot.room_name,
@@ -483,17 +478,35 @@ async def run_batch_pipeline(
                 trigger=GateTrigger(
                     visual_changed=True,
                     visual_change_score=1.0,
-                    audio_active=True,
-                    audio_energy_level=1.0,
+                    audio_active=has_audio,
+                    audio_energy_level=1.0 if has_audio else 0.0,
+                    speech_active=False,
+                    hold=False,
                 ),
                 frames=snapshot.frames,
                 audio_clip=snapshot.audio_clip,
                 sample_rate=snapshot.sample_rate,
                 fps=config.input.fps,
             )
-            gate_timing = None
-            room_timing[f"gate_{did}_bypass"] = 1
+            gate_timing = GateTiming(
+                video_ms=0.0,
+                audio_ms=0.0,
+                video_pass=True,
+                audio_pass=has_audio,
+                video_score=1.0,
+                audio_energy=1.0 if has_audio else 0.0,
+            )
+            room_timing[f"_gate_external_pass_{did}"] = 1
         else:
+            prev_frame = gate_prev_frames.get(did) if gate_prev_frames is not None else None
+            last_v = (
+                gate_last_visual_pass_ts.get(did)
+                if gate_last_visual_pass_ts is not None else None
+            )
+            last_a = (
+                gate_last_audio_pass_ts.get(did)
+                if gate_last_audio_pass_ts is not None else None
+            )
             gate_packet, gate_timing, last_checked, new_last_v, new_last_a = run_gate(
                 snapshot, config.gate, config.input.fps,
                 prev_frame=prev_frame,
