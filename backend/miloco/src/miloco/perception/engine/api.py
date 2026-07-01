@@ -951,6 +951,61 @@ class PerceptionEngine(BasePerceptionEngine):
         answers = [r.answer for r in results.values() if r.answer]
         return OnDemandPerceptionResult(answer="\n".join(answers) if answers else "")
 
+    async def structured_on_demand_perceive(
+        self,
+        batch: BatchedSnapshot,
+        rules: list[dict],
+        extra_context: str = "",
+    ) -> RealtimePerceptionResult:
+        """Active structured perception: skip Gate, keep realtime Omni semantics."""
+        from miloco.perception.engine.pipeline import run_batch_pipeline
+        from miloco.perception.engine.types import OmniContext, RuleCondition
+
+        if batch.empty:
+            return RealtimePerceptionResult(skipped=True)
+
+        rule_conditions = [
+            RuleCondition(
+                rule_id=r["id"],
+                rule_name=r.get("name", ""),
+                query=r.get("condition", {}).get("query", ""),
+            )
+            for r in rules
+            if r.get("condition", {}).get("query")
+        ]
+
+        contexts: dict[str, OmniContext] = {}
+        device_rule_map: dict[str, list[str]] = {}
+        for room_name, snapshots in batch.by_room().items():
+            for snapshot in snapshots:
+                did = snapshot.device.did
+                contexts[did] = OmniContext(
+                    rule_conditions=list(rule_conditions),
+                    pending_speech=self._pending_speech.get(did),
+                    current_time=datetime.now().strftime("%H:%M:%S"),
+                    room_name=room_name,
+                    extra_context=extra_context,
+                )
+                device_rule_map[did] = [rc.rule_id for rc in rule_conditions]
+
+        try:
+            result = await run_batch_pipeline(
+                batch,
+                contexts,
+                self._config,
+                get_tracking_service=self._get_or_create_tracking_service,
+                get_identity_engine=self._get_or_create_identity_engine,
+                assign_suggestion_link=self.assign_id_and_update_link,
+                frame_index_offset=self._global_frame_index,
+                bypass_gate=True,
+            )
+        except Exception as e:
+            logger.error("Structured on-demand pipeline failed: %s", e, exc_info=True)
+            return RealtimePerceptionResult(skipped=True, error_code=f"{type(e).__name__}: {e}")
+
+        self._global_frame_index += self._config.input.fps * self._config.input.period_sec
+        return self._merge_results(result, contexts, device_rule_map=device_rule_map)
+
     # ------------------------------------------------------------------
     # Result merging
     # ------------------------------------------------------------------

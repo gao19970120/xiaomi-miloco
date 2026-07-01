@@ -283,6 +283,9 @@ export interface MiotEventTriggerLog {
   clip_kind: string;
   perception_started: boolean;
   perception_answer: string;
+  captions?: string[];
+  suggestions?: Record<string, unknown>[];
+  structured_matched_rules?: Record<string, unknown>[];
   matched_rule_ids: string[];
   skipped_reason: string;
   error: string;

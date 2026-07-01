@@ -255,6 +255,7 @@ class OmniContext:
     pending_speech: list[dict] | None = None  # [{"speaker": "xx", "content": "打开"}]
     current_time: str | None = None  # "HH:MM:SS" injected system time
     room_name: str | None = None  # 设备所在房间名，作场景参考注入 U4（如"厨房""书房"）
+    extra_context: str | None = None  # 外部触发上下文；仅作参考，不可替代本轮视觉证据
 
 
 

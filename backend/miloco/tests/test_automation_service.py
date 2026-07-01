@@ -60,7 +60,7 @@ def test_coerce_number(value, number):
 
 
 @pytest.mark.asyncio
-async def test_handle_trigger_keeps_query_context_in_text_only():
+async def test_handle_trigger_uses_structured_perception_context():
     service = AutomationService(_KVRepoStub())
     service.create_mapping(
         MiotEventMapping(
@@ -78,13 +78,19 @@ async def test_handle_trigger_keeps_query_context_in_text_only():
 
     captured: dict[str, object] = {}
 
-    async def _on_demand(request, snapshot_sink=None):
-        captured["request"] = request
+    async def _structured(sources, rules, extra_context="", snapshot_sink=None):
+        captured["sources"] = sources
+        captured["rules"] = rules
+        captured["extra_context"] = extra_context
         captured["snapshot_sink"] = snapshot_sink
-        return SimpleNamespace(answer="门口无人")
+        return SimpleNamespace(
+            caption=[SimpleNamespace(description="门口无人")],
+            suggestions=[],
+            matched_rules=[],
+        )
 
     perception_service = SimpleNamespace(
-        on_demand_perceive=_on_demand,
+        structured_on_demand_perceive=_structured,
         publish_meaningful_event=lambda _: None,
     )
     rule_service = SimpleNamespace(get_all_rules=AsyncMock(return_value=[]))
@@ -111,8 +117,7 @@ async def test_handle_trigger_keeps_query_context_in_text_only():
         meaningful_events_dao=meaningful_events_dao,
     )
 
-    request = captured["request"]
-    assert request.trigger_context is None
-    assert "这是一次由米家事件触发的主动感知" in request.query
-    assert "属性变化" in request.query
-    assert "重点看门口" in request.query
+    assert captured["sources"] == ["cam-1"]
+    assert "米家触发上下文" in captured["extra_context"]
+    assert "属性变化" in captured["extra_context"]
+    assert captured["rules"][0]["condition"]["query"] == "重点看门口"

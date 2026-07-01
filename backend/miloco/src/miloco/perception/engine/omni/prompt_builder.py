@@ -270,6 +270,7 @@ def build_fused_payload(
     messages = _assemble_fused_messages(
         system_prompt=system_prompt,
         user_content=user_content,
+        extra_context=context.extra_context,
         rule_conditions=_render_rule_conditions(context),
         readonly_history=_build_readonly_history(context),
     )
@@ -285,6 +286,7 @@ def _assemble_fused_messages(
     *,
     system_prompt: str,
     user_content: list[dict] | str,
+    extra_context: str | None = None,
     rule_conditions: str | None = None,
     readonly_history: str | None = None,
 ) -> list[dict]:
@@ -300,6 +302,8 @@ def _assemble_fused_messages(
     home_profile = get_home_profile_prefix()
     if home_profile:
         messages.append({"role": "user", "content": home_profile})
+    if extra_context:
+        messages.append({"role": "user", "content": extra_context})
     if rule_conditions:
         messages.append({"role": "user", "content": rule_conditions})
     if readonly_history:
@@ -538,6 +542,8 @@ def _build_user_content(
         # 名册是视频特征（定位画面里的人），audio route 无视频 → 不渲染
         parts.extend(_build_device_header(packets, label_lookup=label_lookup))
     parts.extend(_build_context_parts(context, stream=stream))
+    if context.extra_context:
+        parts.append(context.extra_context)
     if context.current_time:
         parts.append(f"当前时间: {context.current_time}")
     if context.room_name:

@@ -19,7 +19,7 @@ from miloco.config import get_settings
 from miloco.database.kv_repo import KVRepo
 from miloco.middleware.exceptions import ResourceNotFoundException
 from miloco.perception import snapshot_writer
-from miloco.perception.schema import OnDemandPerceptionRequest
+from miloco.perception.event_text_builder import caption_for_dids
 from miloco.rule.schema import RuleTriggerType
 from miloco.utils.time_utils import now_ms
 
@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 _KV_MAPPINGS = "AUTOMATION_MIOT_EVENT_MAPPINGS"
 _KV_LOGS = "AUTOMATION_MIOT_EVENT_LOGS"
 _MAX_LOGS = 200
+_TEMP_RULE_PREFIX = "miot_mapping:"
 
 
 def _save_clips_for_event(
@@ -129,6 +130,42 @@ def _match_condition(actual: Any, expected: Any) -> bool:
     if cond.op == "lte":
         return actual_num <= expected_num
     return False
+
+
+def _rule_to_prompt_dict(rule) -> dict[str, Any]:
+    return {
+        "id": rule.id,
+        "name": rule.name,
+        "condition": {"query": rule.condition.query},
+    }
+
+
+def _mapping_to_prompt_rule(mapping: MiotEventMapping) -> dict[str, Any] | None:
+    query = mapping.query_template.strip()
+    if not query:
+        return None
+    name = mapping.source_name_snapshot or mapping.source_id
+    return {
+        "id": f"{_TEMP_RULE_PREFIX}{mapping.id}",
+        "name": f"[感知触发] {name}",
+        "condition": {"query": query},
+    }
+
+
+def _build_trigger_context(trigger: MiotEventTrigger) -> str:
+    label = "触发参数" if trigger.event_name.startswith("event.") else "属性变化"
+    parts = [
+        "# 米家触发上下文",
+        "本次摄像头感知由米家设备事件或属性变化触发。",
+        f"触发来源：{trigger.source_name or trigger.source_id}",
+        f"触发类型：{trigger.event_name or trigger.source_type}",
+    ]
+    if trigger.room_name:
+        parts.append(f"触发设备所在房间：{trigger.room_name}")
+    if trigger.changed_properties:
+        parts.append(f"{label}：{trigger.changed_properties}")
+    parts.append("注意：以上只是触发摄像头查看的原因，不是当前画面事实；规则是否成立必须以本轮视频画面为准。")
+    return "\n".join(parts)
 
 
 class AutomationService:
@@ -369,28 +406,20 @@ class AutomationService:
             self._append_log(log_item)
             return log_item
 
-        query_parts = [
-            f"这是一次由米家事件触发的主动感知。事件源：{trigger.source_name or trigger.source_id}。",
-            f"事件类型：{trigger.event_name or trigger.source_type}。",
-        ]
-        if trigger.changed_properties:
-            query_parts.append(f"属性变化：{trigger.changed_properties}")
-        if candidate_rules:
-            query_parts.extend(
-                [f"- {rule.name}: {rule.condition.query}" for rule in candidate_rules]
-            )
-        mapping_query = next((m.query_template for m in active_mappings if m.query_template), "")
-        if mapping_query:
-            query_parts.append(mapping_query)
-        query_parts.append("请结合当前画面简明回答，并重点说明与触发事件相关的观察。")
+        prompt_rules = [_rule_to_prompt_dict(rule) for rule in candidate_rules]
+        prompt_rules.extend(
+            rule
+            for mapping in active_mappings
+            if (rule := _mapping_to_prompt_rule(mapping)) is not None
+        )
+        real_rule_ids = {rule.id for rule in candidate_rules}
         log_item.perception_started = True
         clips_by_device: dict[str, tuple[bytes, str]] = {}
         try:
-            result = await perception_service.on_demand_perceive(
-                OnDemandPerceptionRequest(
-                    sources=camera_ids,
-                    query="\n".join(query_parts),
-                ),
+            result = await perception_service.structured_on_demand_perceive(
+                camera_ids,
+                prompt_rules,
+                extra_context=_build_trigger_context(trigger),
                 snapshot_sink=clips_by_device,
             )
         except Exception as e:  # noqa: BLE001
@@ -398,8 +427,40 @@ class AutomationService:
             self._append_log(log_item)
             return log_item
 
-        answer = result.answer if result else ""
+        captions = [entry.description for entry in (result.caption if result else [])]
+        suggestions = [
+            suggestion.model_dump(mode="json")
+            for suggestion in (result.suggestions if result else [])
+        ]
+        structured_matched_rules = [
+            matched.model_dump(mode="json")
+            for matched in (result.matched_rules if result else [])
+        ]
+        matched_rule_ids = [matched["rule_id"] for matched in structured_matched_rules]
+        answer_parts: list[str] = []
+        if captions:
+            answer_parts.append("画面观察：" + "；".join(captions))
+        if structured_matched_rules:
+            answer_parts.append(
+                "命中判断："
+                + "；".join(
+                    f"{item.get('rule_name') or item['rule_id']}：{item.get('reason', '')}"
+                    for item in structured_matched_rules
+                )
+            )
+        if suggestions:
+            answer_parts.append(
+                "建议："
+                + "；".join(
+                    f"{item.get('event', '')}，{item.get('action', '')}"
+                    for item in suggestions
+                )
+            )
+        answer = "\n".join(part for part in answer_parts if part)
         log_item.perception_answer = answer
+        log_item.captions = captions
+        log_item.suggestions = suggestions
+        log_item.structured_matched_rules = structured_matched_rules
 
         clip_count = 0
         clip_kind = ""
@@ -425,18 +486,20 @@ class AutomationService:
         log_item.clip_kind = clip_kind
         log_item.clip_device_ids = clip_device_ids
 
-        matched_rule_ids: list[str] = []
-        context = (
-            f"米家事件触发感知\n"
-            f"来源: {trigger.source_name or trigger.source_id}\n"
-            f"事件: {trigger.event_name}\n"
-            f"属性: {trigger.changed_properties}\n"
-            f"感知结果: {answer}"
-        )
-        for rule in candidate_rules:
-            exec_result = await rule_service.trigger_rule(rule.id, context)
-            if exec_result is not None:
-                matched_rule_ids.append(rule.id)
+        for matched in (result.matched_rules if result else []):
+            if matched.rule_id not in real_rule_ids:
+                continue
+            source_did = matched.source_device_ids[0] if matched.source_device_ids else "miot_event"
+            await rule_service.update_state(
+                matched.rule_id,
+                source_did,
+                True,
+                matched.reason,
+                trigger_room=matched.room_name,
+                trigger_dids=matched.source_device_ids,
+                caption=caption_for_dids(result.caption, matched.source_device_ids),
+                device_name=matched.device_name,
+            )
         log_item.matched_rule_ids = matched_rule_ids
 
         if answer:
@@ -454,11 +517,14 @@ class AutomationService:
                     {
                         "trigger": trigger.model_dump(mode="json"),
                         "matched_rule_ids": matched_rule_ids,
+                        "structured_matched_rules": structured_matched_rules,
+                        "captions": captions,
+                        "suggestions": suggestions,
                     },
                     ensure_ascii=False,
                 ),
                 has_rule_hit=bool(matched_rule_ids),
-                has_suggestion=False,
+                has_suggestion=bool(suggestions),
                 has_asr=False,
                 device_ids=camera_ids,
                 snapshot_count=clip_count,
@@ -475,7 +541,7 @@ class AutomationService:
                     "timestamp": trigger.occurred_at or now_ms(),
                     "text": text,
                     "has_rule_hit": bool(matched_rule_ids),
-                    "has_suggestion": False,
+                    "has_suggestion": bool(suggestions),
                     "has_asr": False,
                     "snapshot_count": clip_count,
                     "device_ids": camera_ids,

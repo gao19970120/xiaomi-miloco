@@ -534,6 +534,30 @@ class PerceptionEngineProxy:
 
         return result
 
+    async def _structured_on_demand_perceive_impl(
+        self,
+        batched_snapshot: BatchedSnapshot,
+        rules: list[dict],
+        extra_context: str,
+    ) -> RealtimePerceptionResult | None:
+        """Actual structured on-demand perceive logic — runs in inference thread."""
+        assert self.perception_engine is not None
+        try:
+            result = await self.perception_engine.structured_on_demand_perceive(
+                batched_snapshot, rules, extra_context
+            )
+        except Exception as e:
+            logger.error("[pipeline] 结构化主动感知失败 | %s", e, exc_info=True)
+            result = None
+
+        if result:
+            logger.info(
+                "🔥 structured_on_demand_perceive: %s",
+                result.model_dump_json(ensure_ascii=False),
+            )
+
+        return result
+
     # ---- Public interface (dispatches to inference thread) ----
 
     async def realtime_perceive(
@@ -670,6 +694,54 @@ class PerceptionEngineProxy:
                     return await self._on_demand_perceive_impl(batched_snapshot, query)
 
             return await self._on_demand_perceive_impl(batched_snapshot, query)
+
+    async def structured_on_demand_perceive(
+        self,
+        batch: PerceptionBatch,
+        rules: list[dict],
+        extra_context: str = "",
+        snapshot_sink: dict | None = None,
+    ) -> RealtimePerceptionResult | None:
+        """Run structured on-demand pipeline — offloaded to inference thread."""
+        async with get_monitor().track_async(NodeName.ENGINE, "on_demand") as _eng_h, self._engine_lock:
+            if not self.ready:
+                _eng_h.skip_rolling()
+                return None
+
+            batched_snapshot = batch.to_batched_snapshot()
+            if batched_snapshot is None:
+                _eng_h.skip_rolling()
+                return None
+
+            if batch.end_timestamp and batch.start_timestamp:
+                _eng_h.add_window_ms(batch.end_timestamp - batch.start_timestamp)
+
+            if self._executor is not None:
+                loop = asyncio.get_running_loop()
+                trace_id = get_trace_id()
+                return await loop.run_in_executor(
+                    self._executor,
+                    lambda: asyncio.run(
+                        _run_with_trace_id(
+                            trace_id,
+                            self._structured_on_demand_perceive_impl(
+                                batched_snapshot, rules, extra_context
+                            ),
+                            snapshot_sink=snapshot_sink,
+                        )
+                    ),
+                )
+            if snapshot_sink is not None:
+                from miloco.perception.snapshot_context import snapshot_collector_scope
+
+                with snapshot_collector_scope(snapshot_sink):
+                    return await self._structured_on_demand_perceive_impl(
+                        batched_snapshot, rules, extra_context
+                    )
+
+            return await self._structured_on_demand_perceive_impl(
+                batched_snapshot, rules, extra_context
+            )
 
     async def handle_realtime_perception_result(
         self,
