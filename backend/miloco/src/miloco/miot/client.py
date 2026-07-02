@@ -727,9 +727,8 @@ class MiotProxy:
     async def _create_camera_img_manager(
         self, camera_info: MIoTCameraInfo,
     ) -> CameraVisionHandler | None:
-        # scope 不影响 manager 的建立——watch 视频流需要 camera instance 无论 inUse 状态。
-        # toggle_scope 只改 KV,不触发 refresh_cameras,所以这里只在启动/摄像头首次发现时调用,
-        # 此时 start_async 是正常的初始化,不会干扰已有连接。
+        # 纯建原语:不含 scope gate(黑名单/home 白名单的判断在调用方 refresh_cameras)。
+        # start_async 起 native PPCS 会话+解码;只对通过 refresh gate 的相机调用。
         camera_instance = await self._get_camera_instance(camera_info)
         if camera_instance is not None:
             await camera_instance.start_async(enable_reconnect=True, enable_audio=True)
