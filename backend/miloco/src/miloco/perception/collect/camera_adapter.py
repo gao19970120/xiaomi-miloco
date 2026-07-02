@@ -131,7 +131,11 @@ class CameraDeviceAdapter(BaseDeviceAdapter):
         的相机；口径与 toggle_camera 自洽（同样只数通过 home filter + 未拉黑的相机）。
         ``cap=False`` 用于「列全集」语义（如 rule target 校验），不受投喂上限影响。
         """
-        from miloco.miot.filter import denied_camera_dids, select_active_camera_dids
+        from miloco.miot.filter import (
+            denied_camera_dids,
+            is_home_allowed,
+            select_active_camera_dids,
+        )
 
         kv = self._miot_proxy._kv_repo
         denied = denied_camera_dids(kv)
