@@ -270,7 +270,6 @@ def build_fused_payload(
     messages = _assemble_fused_messages(
         system_prompt=system_prompt,
         user_content=user_content,
-        extra_context=context.extra_context,
         rule_conditions=_render_rule_conditions(context),
         readonly_history=_build_readonly_history(context),
     )
@@ -286,7 +285,6 @@ def _assemble_fused_messages(
     *,
     system_prompt: str,
     user_content: list[dict] | str,
-    extra_context: str | None = None,
     rule_conditions: str | None = None,
     readonly_history: str | None = None,
 ) -> list[dict]:
@@ -302,8 +300,6 @@ def _assemble_fused_messages(
     home_profile = get_home_profile_prefix()
     if home_profile:
         messages.append({"role": "user", "content": home_profile})
-    if extra_context:
-        messages.append({"role": "user", "content": extra_context})
     if rule_conditions:
         messages.append({"role": "user", "content": rule_conditions})
     if readonly_history:
@@ -542,8 +538,6 @@ def _build_user_content(
         # 名册是视频特征（定位画面里的人），audio route 无视频 → 不渲染
         parts.extend(_build_device_header(packets, label_lookup=label_lookup))
     parts.extend(_build_context_parts(context, stream=stream))
-    if context.extra_context:
-        parts.append(context.extra_context)
     if context.current_time:
         parts.append(f"当前时间: {context.current_time}")
     if context.room_name:
@@ -1127,7 +1121,7 @@ def _batch_video_has_speech(packets: list[IdentityPacket]) -> bool:
 def _encode_video(identity_packet: IdentityPacket) -> str | None:
     """Encode all frames + audio into mp4 video, return base64.
 
-    若 ContextVar `snapshot_collector_scope` 在当前 task 中激活,`_encode_video_mp4`
+    若 ContextVar `event_artifacts_scope` 在当前 task 中激活,`_encode_video_mp4`
     会在 resize 后旁路 append 帧给 meaningful_events 截图复用.snapshot 落的就是
     omni 实际看到的那份 frames.
     """
@@ -1162,8 +1156,9 @@ def _encode_video_mp4(
 
     在 read mp4 bytes 之后,调 push_clip_bytes(mp4_bytes) 把字节旁路给
     meaningful_events 复用 — 字节级 = omni 上传的 mp4(零重编).若 ContextVar
-    `snapshot_collector_scope` 在当前 task 中激活,sink 会被填上 {device_id: bytes};
-    scope 未激活时 push 静默 no-op.对齐 "clip ≡ omni 看到的字节" 设计原则.
+    `event_artifacts_scope` 在当前 task 中激活,artifacts.clips 会被填上
+    {device_id: (bytes, kind)};scope 未激活时 push 静默 no-op.
+    对齐 "clip ≡ omni 看到的字节" 设计原则.
     """
     import os
     import tempfile
