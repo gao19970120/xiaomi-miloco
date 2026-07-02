@@ -24,6 +24,7 @@ from miot.types import (
     MIoTDeviceEventOccurredEvent,
     MIoTDeviceInfo,
     MIoTDevicePropertyChangedEvent,
+    MIoTDeviceStateEvent,
     MIoTGetPropertyParam,
     MIoTLanDeviceInfo,
     MIoTManualSceneInfo,
@@ -42,13 +43,18 @@ from miloco.miot.camera_handler import (
     CameraVisionHandler,
     RtspCameraVisionHandler,
 )
-from miloco.miot.filter import allowed_home_ids, is_home_allowed
+from miloco.miot.filter import (
+    allowed_home_ids,
+    is_home_allowed,
+    select_active_camera_dids,
+)
 from miloco.miot.mips_listeners import (
     BindEventListener,
+    CameraStateEventListener,
     DeviceMetaEventListener,
     SceneEventListener,
 )
-from miloco.miot.schema import CameraImgSeq
+from miloco.miot.schema import CameraImgSeq, normalize_sub_devices
 from miloco.miot.welcome_service import DeviceWelcomeService
 
 logger = logging.getLogger(__name__)
@@ -74,19 +80,7 @@ def build_sub_device_names(device: MIoTDeviceInfo) -> dict[str, str]:
     Strips the parent device name suffix (e.g. "三楼书房-客厅多路开关" → "三楼书房")
     so callers consistently see the user-customized portion only.
     """
-    if not device.sub_devices:
-        return {}
-    dev_name_suffix = f"-{device.name}" if device.name else ""
-    result: dict[str, str] = {}
-    for key, sub_dev in device.sub_devices.items():
-        siid = key.lstrip("s")
-        if not siid.isdigit():
-            continue
-        name = sub_dev.name
-        if dev_name_suffix and name.endswith(dev_name_suffix):
-            name = name[: -len(dev_name_suffix)]
-        result[siid] = name
-    return result
+    return normalize_sub_devices(device.sub_devices, device.name)
 
 
 class MiotProxy:
@@ -182,6 +176,20 @@ class MiotProxy:
         # Home ids whose home/{home_id}/scene/{rename,delete,edit} topics this
         # proxy intends to subscribe. Mirrors _subscribed_meta_dids but per home.
         self._subscribed_scene_home_ids: set[str] = set()
+
+        # Listener for device-level cloud online/offline state. Each event
+        # updates _camera_info_dict[did].online directly (in
+        # _on_camera_state_changed_event); this listener is the trailing
+        # reconciliation that re-fetches the authoritative cloud status once
+        # the burst settles.
+        self._camera_state_listener = CameraStateEventListener(
+            refresh_camera_online_status=self.refresh_camera_online_status
+        )
+        # Dids whose device/{did}/state/{online,offline} topics this proxy
+        # intends to subscribe. Mirrors _subscribed_meta_dids but for cloud
+        # online/offline state; drives the diff in
+        # _sync_camera_state_subscriptions.
+        self._subscribed_state_dids: set[str] = set()
 
     def _build_bind_listener(self) -> BindEventListener:
         """Build a fresh BindEventListener.
@@ -372,6 +380,10 @@ class MiotProxy:
             refresh_scenes=self.refresh_scenes
         )
         self._subscribed_scene_home_ids = set()
+        self._camera_state_listener = CameraStateEventListener(
+            refresh_camera_online_status=self.refresh_camera_online_status
+        )
+        self._subscribed_state_dids = set()
         self._miot_client.register_user_bind_callback(self._on_user_bind_event)
         # Device meta change (rename/hr_change): refresh the list so the new
         # name/room/home propagates. Kept off the bind welcome path.
@@ -383,6 +395,12 @@ class MiotProxy:
         )
         self._miot_client.register_device_event_occurred_callback(
             self._on_device_event_occurred
+        )
+        # Device cloud online/offline state: update the cached `online` field
+        # directly (event-driven recovery for cameras that went stale across a
+        # backend restart), plus a trailing reconciliation.
+        self._miot_client.register_device_state_changed_callback(
+            self._on_camera_state_changed_event
         )
         # Home scene change (rename/delete/edit): refresh the scene list.
         self._miot_client.register_scene_changed_callback(
@@ -420,6 +438,7 @@ class MiotProxy:
         self._bind_listener.deinit()
         self._meta_listener.deinit()
         self._scene_listener.deinit()
+        self._camera_state_listener.deinit()
 
         # 2. Destroy all camera_img_managers
         for mgr in self._camera_img_managers.values():
@@ -461,6 +480,8 @@ class MiotProxy:
         self._user_info = None
         self._subscribed_meta_dids = set()
         self._subscribed_property_dids = set()
+        self._subscribed_event_dids = set()
+        self._subscribed_state_dids = set()
         self._subscribed_scene_home_ids = set()
         # Welcome service survives deinit (rebuilt only in __init__), but its
         # dedup window state must reset alongside the other in-memory caches —
@@ -807,9 +828,19 @@ class MiotProxy:
                 cameras = copy.deepcopy(cameras)
                 # Publish before registering so callbacks resolve against the new dict.
                 self._camera_info_dict = cameras
+                # manager(native PPCS 会话+解码线程)的建/销与感知拉喂 *共用同一口径*
+                # (select_active_camera_dids)：在启用家庭 + 未拉黑 + 在线、按 did 截到上限。
+                # 拉流池 = 投喂集，单一来源不漂移；关掉/移出家庭/离线/超额的相机都不在
+                # active 里 → 不建/已建则销，真正停掉 native 会话与解码（含 over-cap 收敛）。
+                active = set(select_active_camera_dids(self._kv_repo, cameras))
+                logger.debug(
+                    "Camera streaming set: active=%s managers=%s",
+                    sorted(active),
+                    sorted(self._camera_img_managers),
+                )
                 for camera_did in cameras.keys():
                     if camera_did not in self._camera_img_managers:
-                        if not is_home_allowed(self._kv_repo, cameras[camera_did].home_id):
+                        if camera_did not in active:
                             continue
                         manager = await self._create_camera_img_manager(
                             cameras[camera_did]
@@ -820,29 +851,53 @@ class MiotProxy:
                             await self._miot_client.register_lan_device_changed_async(
                                 did=camera_did, callback=self._on_lan_device_changed
                             )
+                            # 起停相机 native 会话直接影响相机有限的并发流名额，
+                            # 用 WARNING 便于运维一眼追踪拉流生命周期。
+                            logger.warning(
+                                "Camera native stream started: %s", camera_did
+                            )
                     else:
                         await self._camera_img_managers[camera_did].update_camera_info(
                             cameras[camera_did]
                         )
 
                 for camera_did in list(self._camera_img_managers.keys()):
-                    cam = cameras.get(camera_did)
-                    # scope=false 时不 destroy,只有摄像头真正从账号消失才 destroy。
-                    # RTSP 摄像头不在 miot SDK 列表里,跳过不 destroy。
-                    if cam is None:
-                        # 检查是否是 RTSP 摄像头(不在 miot camera_info_dict 但有 rid)
-                        rtsp_info = self._rtsp_camera_info_dict.get(camera_did)
-                        if rtsp_info and rtsp_info.source == "rtsp":
-                            logger.debug("RTSP camera %s kept alive during refresh", camera_did)
-                            continue
+                    # RTSP 摄像头不在 miot SDK 列表里，单独保留不 destroy。
+                    rtsp_info = (
+                        self._rtsp_camera_info_dict.get(camera_did)
+                        if _RTSP_AVAILABLE
+                        else None
+                    )
+                    if rtsp_info and rtsp_info.source == "rtsp":
+                        logger.debug("RTSP camera %s kept alive during refresh", camera_did)
+                        continue
+                    # 不在 active 集（账号消失 / 移出家庭 / 被关 / 离线 / 超额）→ 销毁，
+                    # 真正 miot_camera_stop + decoder.stop()，停掉 native 会话与解码。
+                    if camera_did in active:
+                        logger.debug(
+                            "Manager %s kept alive (in_use & in scope)", camera_did
+                        )
+                        continue
+                    # 每台单独容错异常：批量销（切家庭销旧家 N 台 / 超额收敛 N-M 台）时，
+                    # 任一台 unregister/destroy 抛错不能拖垮其余——否则判官剩下的 manager 留在
+                    # dict 里继续白拉流，要等下次 refresh 才重试。失败的留在 dict 待重试。
+                    try:
                         await self._miot_client.unregister_lan_device_changed_async(
                             did=camera_did
                         )
                         await self._camera_img_managers[camera_did].destroy()
                         del self._camera_img_managers[camera_did]
-                    else:
-                        # cam 仍在账号里,manager 保活(无论 scope 状态)。
-                        logger.debug("Manager %s kept alive for watch stream", camera_did)
+                        logger.warning(
+                            "Camera native stream stopped: %s", camera_did
+                        )
+                    except Exception as e:  # noqa: BLE001
+                        logger.error(
+                            "Failed to destroy camera manager %s, "
+                            "leaving in dict for retry: %s",
+                            camera_did,
+                            e,
+                        )
+                await self._sync_camera_state_subscriptions()
                 return cameras
 
             except Exception as e:
@@ -1023,6 +1078,27 @@ class MiotProxy:
             len(self._subscribed_meta_dids),
         )
 
+    async def _on_camera_state_changed_event(self, msg: MIoTDeviceStateEvent) -> None:
+        """Handle a device cloud online/offline state push.
+
+        Updates the cached ``online`` field of the matching camera directly
+        from the event (online→True / offline→False), mirroring how
+        ``_on_lan_device_changed`` updates ``lan_online``. No cloud re-fetch
+        here — the authoritative reconciliation is deferred to the trailing
+        debounce (refresh_camera_online_status once the burst settles). Non-
+        camera devices are ignored (their state events carry no camera info).
+        """
+        cam = self._camera_info_dict.get(msg.did)
+        if cam is not None:
+            cam.online = msg.event == "online"
+            logger.info(
+                "camera cloud state updated: did=%s online=%s (event=%s)",
+                msg.did,
+                cam.online,
+                msg.event,
+            )
+        await self._camera_state_listener.on_event(msg)
+
     async def _on_device_property_changed_event(
         self, msg: MIoTDevicePropertyChangedEvent
     ) -> None:
@@ -1170,6 +1246,60 @@ class MiotProxy:
             len([d for d in added if d]),
             len([d for d in removed if d]),
             len(self._subscribed_event_dids),
+        )
+
+    async def _sync_camera_state_subscriptions(self) -> None:
+        """Reconcile per-device cloud state (online/offline) subs to the
+        camera list.
+
+        Called at the tail of refresh_cameras (under _refresh_cameras_lock, so
+        the diff against _subscribed_state_dids is race-free). New dids are
+        subscribed, removed dids unsubscribed; both run concurrently and
+        per-did failures only log — they never abort the refresh. Mirrors
+        _sync_meta_subscriptions but scoped to cameras (we only care about
+        camera cloud online state).
+
+        Dids containing '/' (Huami/Zepp-bridged sub-devices) are skipped:
+        the '/' breaks the topic path AND the decoder regex, and the broker
+        rejects them with 0x87 — same rationale as _sync_meta_subscriptions.
+        """
+        target = {did for did in self._camera_info_dict if "/" not in did}
+        skipped = [did for did in self._camera_info_dict if "/" in did]
+        if skipped:
+            logger.debug(
+                "camera-state: skipping %d did(s) with '/': %s",
+                len(skipped),
+                skipped,
+            )
+        to_add = target - self._subscribed_state_dids
+        to_remove = self._subscribed_state_dids - target
+        if not to_add and not to_remove:
+            return
+
+        async def _sub(did: str) -> str | None:
+            try:
+                await self._miot_client.sub_device_state_async(did)
+                return did
+            except Exception as e:
+                logger.error("subscribe device-state failed did=%s: %s", did, e)
+                return None
+
+        async def _unsub(did: str) -> str | None:
+            try:
+                await self._miot_client.unsub_device_state_async(did)
+            except Exception as e:
+                logger.error("unsubscribe device-state failed did=%s: %s", did, e)
+            return did
+
+        added = await asyncio.gather(*(_sub(d) for d in to_add))
+        removed = await asyncio.gather(*(_unsub(d) for d in to_remove))
+        self._subscribed_state_dids |= {d for d in added if d}
+        self._subscribed_state_dids -= {d for d in removed if d}
+        logger.info(
+            "camera-state subscriptions synced: +%d -%d (total=%d)",
+            len([d for d in added if d]),
+            len([d for d in removed if d]),
+            len(self._subscribed_state_dids),
         )
 
     async def _on_scene_changed_event(self, msg: MIoTSceneChangedEvent) -> None:

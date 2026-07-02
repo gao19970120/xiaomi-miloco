@@ -810,28 +810,6 @@ export function AutomationPage({ devices, cameras }: Props) {
                   {log.perception_answer}
                 </div>
               ) : null}
-              {log.structured_matched_rules?.length ? (
-                <div className="mt-2 rounded-md border border-border bg-bg-secondary p-2 text-caption text-text-secondary">
-                  <div className="font-medium text-text-primary">结构化命中</div>
-                  {log.structured_matched_rules.map((rule, idx) => (
-                    <div key={idx} className="mt-1">
-                      {String(rule.rule_name || rule.rule_id || "感知提示")}：
-                      {String(rule.reason || "")}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-              {log.suggestions?.length ? (
-                <div className="mt-2 rounded-md border border-border bg-bg-secondary p-2 text-caption text-text-secondary">
-                  <div className="font-medium text-text-primary">场景建议</div>
-                  {log.suggestions.map((suggestion, idx) => (
-                    <div key={idx} className="mt-1">
-                      {String(suggestion.event || "")}
-                      {suggestion.action ? `：${String(suggestion.action)}` : ""}
-                    </div>
-                  ))}
-                </div>
-              ) : null}
             </div>
           ))}
         </div>
