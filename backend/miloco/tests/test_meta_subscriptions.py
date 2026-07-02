@@ -31,6 +31,7 @@ def _bare_proxy() -> MiotProxy:
     proxy = MiotProxy.__new__(MiotProxy)
     proxy._subscribed_meta_dids = set()
     proxy._subscribed_property_dids = set()
+    proxy._subscribed_event_dids = set()
     proxy._subscribed_scene_home_ids = set()
     proxy._device_info_dict = {}
     proxy._camera_info_dict = {}
@@ -91,6 +92,7 @@ async def test_sync_noop_when_already_in_sync():
 
 @pytest.mark.asyncio
 async def test_sync_property_subscriptions_only_tracks_enabled_device_mappings(
+    monkeypatch,
 ):
     proxy = _bare_proxy()
     proxy._subscribed_property_dids = {"OLD", "B"}
@@ -117,7 +119,6 @@ async def test_sync_property_subscriptions_only_tracks_enabled_device_mappings(
         MiotEventMapping(source_type="device", source_id="dev/skip", enabled=True),
         MiotEventMapping(source_type="device", source_id="missing", enabled=True),
     ]
-
     await proxy._sync_property_subscriptions(mappings)
 
     proxy._miot_client.sub_device_property_changed_async.assert_not_awaited()
@@ -157,7 +158,6 @@ async def test_sync_event_subscriptions_only_tracks_device_event_mappings():
             event_kinds=["event.2.1"],
         ),
     ]
-
     await proxy._sync_event_subscriptions(mappings)
 
     proxy._miot_client.sub_device_event_occurred_async.assert_awaited_once_with("B")
@@ -173,7 +173,6 @@ async def test_sync_property_subscriptions_adds_new_enabled_mapping():
     proxy._device_info_dict = {"C": SimpleNamespace(did="C")}
 
     mappings = [MiotEventMapping(source_type="device", source_id="C", enabled=True)]
-
     await proxy._sync_property_subscriptions(mappings)
 
     proxy._miot_client.sub_device_property_changed_async.assert_awaited_once_with("C")
