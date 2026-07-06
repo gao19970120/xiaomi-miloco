@@ -1,6 +1,8 @@
 """realtime_perceive 的 rule 过滤分发逻辑（api.py:728-753）——确认 rule 按
 `condition.perceive_device_ids` 精确下发到对应 device，不再 room-级扩散。"""
 
+from contextlib import contextmanager
+from types import ModuleType
 from unittest.mock import patch
 
 import numpy as np
@@ -17,6 +19,14 @@ from miloco.perception.types import (
     VideoFrame,
     VideoStream,
 )
+
+
+@contextmanager
+def _patch_run_batch_pipeline(fake_run_batch_pipeline):
+    pipeline = ModuleType("miloco.perception.engine.pipeline")
+    pipeline.run_batch_pipeline = fake_run_batch_pipeline
+    with patch.dict("sys.modules", {"miloco.perception.engine.pipeline": pipeline}):
+        yield
 
 
 def _make_snapshot(did: str, room_name: str) -> DeviceSnapshot:
@@ -71,10 +81,7 @@ async def test_rules_filtered_per_device():
         captured["contexts"] = contexts
         return BatchPipelineResult()
 
-    with patch(
-        "miloco.perception.engine.pipeline.run_batch_pipeline",
-        side_effect=fake_run_batch_pipeline,
-    ):
+    with _patch_run_batch_pipeline(fake_run_batch_pipeline):
         await engine.realtime_perceive(batch, rules=rules)
 
     contexts = captured["contexts"]
@@ -100,10 +107,7 @@ async def test_empty_rules_list_yields_empty_rule_conditions():
         captured["contexts"] = contexts
         return BatchPipelineResult()
 
-    with patch(
-        "miloco.perception.engine.pipeline.run_batch_pipeline",
-        side_effect=fake_run_batch_pipeline,
-    ):
+    with _patch_run_batch_pipeline(fake_run_batch_pipeline):
         await engine.realtime_perceive(batch, rules=[])
 
     assert captured["contexts"]["cam_x"].rule_conditions == []
@@ -122,10 +126,7 @@ async def test_room_name_still_attached_to_context():
         captured["contexts"] = contexts
         return BatchPipelineResult()
 
-    with patch(
-        "miloco.perception.engine.pipeline.run_batch_pipeline",
-        side_effect=fake_run_batch_pipeline,
-    ):
+    with _patch_run_batch_pipeline(fake_run_batch_pipeline):
         await engine.realtime_perceive(batch, rules=[])
 
     assert captured["contexts"]["cam_x"].room_name == "厨房"
@@ -145,10 +146,7 @@ async def test_external_gate_context_passed_to_batch_pipeline():
         captured["force_gate_pass_dids"] = kwargs.get("force_gate_pass_dids")
         return BatchPipelineResult()
 
-    with patch(
-        "miloco.perception.engine.pipeline.run_batch_pipeline",
-        side_effect=fake_run_batch_pipeline,
-    ):
+    with _patch_run_batch_pipeline(fake_run_batch_pipeline):
         await engine.realtime_perceive(
             batch,
             rules=[],
@@ -158,6 +156,39 @@ async def test_external_gate_context_passed_to_batch_pipeline():
 
     assert captured["force_gate_pass_dids"] == {"cam_x"}
     assert captured["contexts"]["cam_x"].extra_context == "米家门锁按铃触发"
+
+
+@pytest.mark.asyncio
+async def test_context_current_time_wired_to_fmt_clock(monkeypatch):
+    """OmniContext.current_time 必须走 _fmt_clock（部署时区），非裸 fromtimestamp。
+
+    双时区断言使回退接线（改回 host 时钟）在任何 CI host 上都必红：
+    snapshot.start_timestamp=1000ms = 1970-01-01T00:00:01Z。
+    """
+    from miloco.config import reset_settings
+
+    cam = _make_snapshot("cam_x", "书房")
+
+    engine = PerceptionEngine(PerceptionConfig())
+    captured: dict = {}
+
+    async def fake_run_batch_pipeline(batch_, contexts, *args, **kwargs):
+        captured["contexts"] = contexts
+        return BatchPipelineResult()
+
+    try:
+        with _patch_run_batch_pipeline(fake_run_batch_pipeline):
+            monkeypatch.setenv("MILOCO_TIMEZONE", "Asia/Shanghai")
+            reset_settings()
+            await engine.realtime_perceive(BatchedSnapshot(snapshots=[cam]), rules=[])
+            assert captured["contexts"]["cam_x"].current_time == "08:00:01"
+
+            monkeypatch.setenv("MILOCO_TIMEZONE", "America/Los_Angeles")
+            reset_settings()
+            await engine.realtime_perceive(BatchedSnapshot(snapshots=[cam]), rules=[])
+            assert captured["contexts"]["cam_x"].current_time == "16:00:01"
+    finally:
+        reset_settings()
 
 
 # ---------- device_rule_map 构造正确性(层 1)----------
@@ -173,10 +204,7 @@ async def _run_perceive(batch, rules):
     async def fake_run_batch_pipeline(batch_, contexts, *args, **kwargs):
         return BatchPipelineResult()
 
-    with patch(
-        "miloco.perception.engine.pipeline.run_batch_pipeline",
-        side_effect=fake_run_batch_pipeline,
-    ):
+    with _patch_run_batch_pipeline(fake_run_batch_pipeline):
         return await engine.realtime_perceive(batch, rules=rules)
 
 
