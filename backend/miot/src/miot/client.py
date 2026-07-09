@@ -902,9 +902,8 @@ class MIoTClient:
                 len(dids),
             )
 
-        property_sub_dids = getattr(self, "_property_sub_dids", set())
-        if property_sub_dids:
-            dids = sorted(property_sub_dids)
+        if self._property_sub_dids:
+            dids = sorted(self._property_sub_dids)
             self._property_sub_dids = set()
             ok = 0
             for did in dids:
@@ -923,9 +922,8 @@ class MIoTClient:
                 len(dids),
             )
 
-        event_sub_dids = getattr(self, "_event_sub_dids", set())
-        if event_sub_dids:
-            dids = sorted(event_sub_dids)
+        if self._event_sub_dids:
+            dids = sorted(self._event_sub_dids)
             self._event_sub_dids = set()
             ok = 0
             for did in dids:
@@ -966,9 +964,8 @@ class MIoTClient:
             )
 
         # Same replay for per-device cloud state (online/offline) subs.
-        state_sub_dids = getattr(self, "_state_sub_dids", set())
-        if state_sub_dids:
-            dids = sorted(state_sub_dids)
+        if self._state_sub_dids:
+            dids = sorted(self._state_sub_dids)
             self._state_sub_dids = set()
             ok = 0
             for did in dids:
@@ -1125,6 +1122,7 @@ class MIoTClient:
         if mips is None or not mips.is_connected:
             self._event_sub_dids.update(dids)
             return dids
+
         event_decoder = mips._make_device_event_decoder()
         specs = [
             (f"device/{did}/up/event_occured/#", self._on_device_event_occurred_msg, event_decoder)
@@ -1133,6 +1131,17 @@ class MIoTClient:
         await mips.sub_many_async(specs)
         self._event_sub_dids.update(dids)
         return dids
+
+    async def unsub_device_event_occurred_many_async(self, dids: list[str]) -> None:
+        """Unsubscribe device-event topics for multiple dids in one packet."""
+        if not dids:
+            return
+        topics = [f"device/{did}/up/event_occured/#" for did in dids]
+        mips = self._mips_cloud
+        if mips is not None:
+            await mips.unsub_many_async(topics)
+        for did in dids:
+            self._event_sub_dids.discard(did)
 
     async def unsub_device_event_occurred_async(self, did: str) -> None:
         self._event_sub_dids.discard(did)
